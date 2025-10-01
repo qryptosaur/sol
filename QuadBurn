@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract QuadraticBurn {
+    string public name = "QuadBurn";
+    string public symbol = "QBT";
+    uint8 public decimals = 18;
+    uint256 public totalSupply = 1_000_000_000 * 1e18;
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    uint256 public txCount;
+
+    event Transfer(address from, address to, uint256 amount);
+
+    constructor() {
+        balanceOf[msg.sender] = totalSupply;
+        emit Transfer(address(0), msg.sender, totalSupply);
+    }
+
+    function approve(address spender, uint256 amount) public returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) public returns (bool) {
+        _transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public returns (bool) {
+        require(allowance[from][msg.sender] >= amount, "Not allowed");
+        allowance[from][msg.sender] -= amount;
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    function _transfer(address from, address to, uint256 amount) internal {
+        require(balanceOf[from] >= amount, "Not enough");
+
+        txCount++;
+        uint256 burnAmt = (txCount * txCount) % 100 * 1e18; // quadratic burn grows
+        if (burnAmt > amount / 10) { burnAmt = amount / 10; } // cap burn at 10%
+
+        uint256 sendAmt = amount - burnAmt;
+
+        balanceOf[from] -= amount;
+        balanceOf[to] += sendAmt;
+        totalSupply -= burnAmt;
+
+        emit Transfer(from, to, sendAmt);
+        if (burnAmt > 0) emit Transfer(from, address(0), burnAmt);
+    }
+}
