@@ -1,0 +1,165 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+/**
+ * @title DynamicFeeToken
+ * @notice ERC20 with auto-split transaction fees:
+ *  - Part to liquidity wallet
+ *  - Part to treasury wallet
+ *  - Part burned forever
+ * Supply: 1,000,000,000 (1B)
+ * Name: TestDynamic
+ * Symbol: TDT
+ */
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+}
+
+abstract contract Ownable is Context {
+    address private _owner;
+    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+
+    constructor() {
+        _owner = _msgSender();
+        emit OwnershipTransferred(address(0), _owner);
+    }
+
+    function owner() public view virtual returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(owner() == _msgSender(), "Not owner");
+        _;
+    }
+
+    function transferOwnership(address newOwner) public onlyOwner {
+        require(newOwner != address(0), "Zero addr");
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+contract DynamicFeeToken is Context, IERC20, Ownable {
+    string private _name = "TestDynamic";
+    string private _symbol = "TDT";
+    uint8 private _decimals = 18;
+    uint256 private _totalSupply = 1_000_000_000 * 1e18;
+
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    // Fee wallets
+    address public liquidityWallet;
+    address public treasuryWallet;
+
+    // Fee percentages (in basis points, 100 = 1%)
+    uint256 public liquidityFeeBP = 200; // 2%
+    uint256 public treasuryFeeBP = 200;  // 2%
+    uint256 public burnFeeBP = 100;      // 1%
+    uint256 public constant BP_DENOM = 10000; // 100% = 10000 BP
+
+    event FeesUpdated(uint256 liquidityBP, uint256 treasuryBP, uint256 burnBP);
+
+    constructor(address _liquidityWallet, address _treasuryWallet) {
+        liquidityWallet = _liquidityWallet;
+        treasuryWallet = _treasuryWallet;
+        _balances[_msgSender()] = _totalSupply;
+        emit Transfer(address(0), _msgSender(), _totalSupply);
+    }
+
+    // ============ ERC20 standard ============
+    function name() public view returns (string memory) { return _name; }
+    function symbol() public view returns (string memory) { return _symbol; }
+    function decimals() public view returns (uint8) { return _decimals; }
+    function totalSupply() public view override returns (uint256) { return _totalSupply; }
+    function balanceOf(address account) public view override returns (uint256) { return _balances[account]; }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        _transfer(_msgSender(), to, amount);
+        return true;
+    }
+
+    function allowance(address owner, address spender) public view override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function approve(address spender, uint256 amount) public override returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
+        uint256 curAllowance = _allowances[from][_msgSender()];
+        require(curAllowance >= amount, "ERC20: insufficient allowance");
+        unchecked { _approve(from, _msgSender(), curAllowance - amount); }
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    function _approve(address owner, address spender, uint256 amount) internal {
+        require(owner != address(0) && spender != address(0), "Zero addr");
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    // ============ Core Transfer with Fees ============
+    function _transfer(address from, address to, uint256 amount) internal {
+        require(from != address(0) && to != address(0), "Zero addr");
+        require(_balances[from] >= amount, "Insufficient balance");
+
+        // Calculate fees
+        uint256 liquidityAmt = (amount * liquidityFeeBP) / BP_DENOM;
+        uint256 treasuryAmt = (amount * treasuryFeeBP) / BP_DENOM;
+        uint256 burnAmt = (amount * burnFeeBP) / BP_DENOM;
+        uint256 sendAmt = amount - liquidityAmt - treasuryAmt - burnAmt;
+
+        // Deduct from sender
+        _balances[from] -= amount;
+
+        // Distribute
+        _balances[to] += sendAmt;
+        emit Transfer(from, to, sendAmt);
+
+        if (liquidityAmt > 0) {
+            _balances[liquidityWallet] += liquidityAmt;
+            emit Transfer(from, liquidityWallet, liquidityAmt);
+        }
+        if (treasuryAmt > 0) {
+            _balances[treasuryWallet] += treasuryAmt;
+            emit Transfer(from, treasuryWallet, treasuryAmt);
+        }
+        if (burnAmt > 0) {
+            _totalSupply -= burnAmt;
+            emit Transfer(from, address(0), burnAmt);
+        }
+    }
+
+    // ============ Admin functions ============
+    function setFeeWallets(address _liquidity, address _treasury) external onlyOwner {
+        liquidityWallet = _liquidity;
+        treasuryWallet = _treasury;
+    }
+
+    function setFees(uint256 liquidityBP, uint256 treasuryBP, uint256 burnBP) external onlyOwner {
+        require(liquidityBP + treasuryBP + burnBP <= 2000, "Max 20% fees total");
+        liquidityFeeBP = liquidityBP;
+        treasuryFeeBP = treasuryBP;
+        burnFeeBP = burnBP;
+        emit FeesUpdated(liquidityBP, treasuryBP, burnBP);
+    }
+}
